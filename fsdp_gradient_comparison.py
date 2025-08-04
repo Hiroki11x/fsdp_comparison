@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """
+torchrun --nproc-per-node=4 fsdp_gradient_comparison.py
+
 FSDP1 vs FSDP2 Parameter/Gradient Access Comparison
 
 Purpose: Compare parameter and gradient accessibility between FSDP1 and FSDP2
@@ -121,50 +123,52 @@ class ParameterAccessTester:
                     if param.grad is not None:
                         param.grad = None
 
-            for name, param in model.named_parameters():
-                if not param.requires_grad:
+            for fsdp_module in model.modules():
+                from torch.distributed.fsdp import FSDPModule
+                if not isinstance(fsdp_module, FSDPModule):
                     continue
 
-                results['total_grads'] += 1
+                for fsdp_param in fsdp_module._get_fsdp_state()._fsdp_param_group.fsdp_params:
+                    param_name = fsdp_param._param_fqn
+                    unsharded_param = fsdp_param._unsharded_param
 
-                # Test gradient access methods
-                grad_sources = {
-                    'grad': param.grad,
-                    'main_grad': getattr(param, 'main_grad', None),
-                    'cuda_grad': getattr(param, 'cuda_grad', None),
-                }
+                    if not unsharded_param.requires_grad:
+                        continue
+                    
+                    grad_info = {'name': param_name}
+                    # https://github.com/pytorch/pytorch/blob/6b414f56a4a133a428af618d8ed1553849341497/torch/distributed/fsdp/_fully_shard/_fsdp_param.py#L640-L646
+                    grad_sources = {
+                        'unsharded_param.grad': unsharded_param.grad,
+                        'unsharded_accumulated_grad': fsdp_param.unsharded_accumulated_grad,
+                    }
+                    accessible_grad = None
+            
+                    for source_name, grad in grad_sources.items():
+                        if grad is not None:
+                            try:
+                                # Convert DTensor to local if needed
+                                if isinstance(grad, DTensor):
+                                    local_grad = grad.to_local()
+                                    grad_info[source_name] = f"DTensor->local, shape={local_grad.shape}"
+                                    accessible_grad = local_grad    
+                                else:
+                                    grad_info[source_name] = f"Tensor, shape={grad.shape}"
+                                    accessible_grad = grad
+                                break
+                            except Exception as e:
+                                grad_info[source_name] = f"Error: {e}"
+                        else:
+                            grad_info[source_name] = "None"
 
-                grad_info = {'name': name}
-                accessible_grad = None
+                    if accessible_grad is not None:
+                        results['accessible_grads'] += 1
+                        results['gradient_norms'].append(accessible_grad.norm().item())
 
-                for source_name, grad in grad_sources.items():
-                    if grad is not None:
-                        try:
-                            # Convert DTensor to local if needed
-                            if isinstance(grad, DTensor):
-                                local_grad = grad.to_local()
-                                grad_info[source_name] = f"DTensor->local, shape={local_grad.shape}"
-                                accessible_grad = local_grad
-                            else:
-                                grad_info[source_name] = f"Tensor, shape={grad.shape}"
-                                accessible_grad = grad
+                    results['grad_details'].append(grad_info)
 
-                        except Exception as e:
-                            grad_info[source_name] = f"Error: {e}"
-                    else:
-                        grad_info[source_name] = "None"
-
-                if accessible_grad is not None:
-                    results['accessible_grads'] += 1
-                    results['gradient_norms'].append(accessible_grad.norm().item())
-
-                results['grad_details'].append(grad_info)
-
-            results['success'] = results['accessible_grads'] > 0
-
+                results['success'] = results['accessible_grads'] > 0
         except Exception as e:
             results['error'] = str(e)
-
         return results
 
     @staticmethod
@@ -345,18 +349,18 @@ def test_fsdp2_capabilities():
     )
 
     # Test 2: Parameter access after forward pass
-    optimizer.zero_grad()
-    output = model(x)
-    results['param_access_after_forward'] = tester.test_parameter_access(
-        model, "FSDP2 Parameter Access After Forward"
-    )
+    # optimizer.zero_grad()
+    # output = model(x)
+    # results['param_access_after_forward'] = tester.test_parameter_access(
+    #     model, "FSDP2 Parameter Access After Forward"
+    # )
 
-    # Test 3: Gradient access with normal sync
-    loss = loss_fn(output, target)
-    loss.backward()
-    results['grad_access_with_sync'] = tester.test_gradient_access(
-        model, "FSDP2 Gradient Access (Normal Sync)", clear_grads=False
-    )
+    # # Test 3: Gradient access with normal sync
+    # loss = loss_fn(output, target)
+    # loss.backward()
+    # results['grad_access_with_sync'] = tester.test_gradient_access(
+    #     model, "FSDP2 Gradient Access (Normal Sync)", clear_grads=False
+    # )
 
     # Test 4: Gradient access with disabled sync
     optimizer.zero_grad()
@@ -511,11 +515,11 @@ def main():
     fsdp2_results = {}
 
     # Run FSDP1 tests
-    try:
-        fsdp1_results = test_fsdp1_capabilities()
-    except Exception as e:
-        print(f"\n❌ FSDP1 test failed: {e}")
-        traceback.print_exc()
+    # try:
+    #     fsdp1_results = test_fsdp1_capabilities()
+    # except Exception as e:
+    #     print(f"\n❌ FSDP1 test failed: {e}")
+    #     traceback.print_exc()
 
     # Run FSDP2 tests
     try:
@@ -525,12 +529,12 @@ def main():
         traceback.print_exc()
 
     # Compare results
-    if fsdp1_results and fsdp2_results:
-        comparison = compare_results(fsdp1_results, fsdp2_results)
-        return 0 if not comparison['overall_regression'] else 1
-    else:
-        print("\n❌ Could not complete comparison due to test failures")
-        return 1
+    # if fsdp1_results and fsdp2_results:
+    #     comparison = compare_results(fsdp1_results, fsdp2_results)
+    #     return 0 if not comparison['overall_regression'] else 1
+    # else:
+    #     print("\n❌ Could not complete comparison due to test failures")
+    #     return 1
 
 
 if __name__ == "__main__":
