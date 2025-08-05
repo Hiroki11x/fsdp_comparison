@@ -106,7 +106,71 @@ class ParameterAccessTester:
         return results
 
     @staticmethod
-    def test_gradient_access(model, test_name: str, clear_grads: bool = True) -> Dict[str, any]:
+    def test_gradient_access_fsdp1(model, test_name: str, clear_grads: bool = True) -> Dict[str, any]:
+        """Test gradient accessibility"""
+        results = {
+            'test_name': test_name,
+            'accessible_grads': 0,
+            'total_grads': 0,
+            'grad_details': [],
+            'success': False,
+            'gradient_norms': []
+        }
+
+        try:
+            if clear_grads:
+                for param in model.parameters():
+                    if param.grad is not None:
+                        param.grad = None
+
+            for name, param in model.named_parameters():
+                if not param.requires_grad:
+                    continue
+
+                results['total_grads'] += 1
+
+                # Test gradient access methods
+                grad_sources = {
+                    'grad': param.grad,
+                    'main_grad': getattr(param, 'main_grad', None),
+                    'cuda_grad': getattr(param, 'cuda_grad', None),
+                }
+
+                grad_info = {'name': name}
+                accessible_grad = None
+
+                for source_name, grad in grad_sources.items():
+                    if grad is not None:
+                        try:
+                            # Convert DTensor to local if needed
+                            if isinstance(grad, DTensor):
+                                local_grad = grad.to_local()
+                                grad_info[source_name] = f"DTensor->local, shape={local_grad.shape}"
+                                accessible_grad = local_grad
+                            else:
+                                grad_info[source_name] = f"Tensor, shape={grad.shape}"
+                                accessible_grad = grad
+
+                        except Exception as e:
+                            grad_info[source_name] = f"Error: {e}"
+                    else:
+                        grad_info[source_name] = "None"
+
+                if accessible_grad is not None:
+                    results['accessible_grads'] += 1
+                    results['gradient_norms'].append(accessible_grad.norm().item())
+
+                results['grad_details'].append(grad_info)
+
+            results['success'] = results['accessible_grads'] > 0
+
+        except Exception as e:
+            results['error'] = str(e)
+
+        return results
+
+    @staticmethod
+    def test_gradient_access_fsdp2(model, test_name: str, clear_grads: bool = True) -> Dict[str, any]:
         """Test gradient accessibility"""
         results = {
             'test_name': test_name,
@@ -134,7 +198,7 @@ class ParameterAccessTester:
 
                     if not unsharded_param.requires_grad:
                         continue
-                    
+
                     grad_info = {'name': param_name}
                     # https://github.com/pytorch/pytorch/blob/6b414f56a4a133a428af618d8ed1553849341497/torch/distributed/fsdp/_fully_shard/_fsdp_param.py#L640-L646
                     grad_sources = {
@@ -142,7 +206,7 @@ class ParameterAccessTester:
                         'unsharded_accumulated_grad': fsdp_param.unsharded_accumulated_grad,
                     }
                     accessible_grad = None
-            
+
                     for source_name, grad in grad_sources.items():
                         if grad is not None:
                             try:
@@ -150,7 +214,7 @@ class ParameterAccessTester:
                                 if isinstance(grad, DTensor):
                                     local_grad = grad.to_local()
                                     grad_info[source_name] = f"DTensor->local, shape={local_grad.shape}"
-                                    accessible_grad = local_grad    
+                                    accessible_grad = local_grad
                                 else:
                                     grad_info[source_name] = f"Tensor, shape={grad.shape}"
                                     accessible_grad = grad
@@ -249,7 +313,7 @@ def test_fsdp1_capabilities():
     # Test 3: Gradient access with normal sync
     loss = loss_fn(output, target)
     loss.backward()
-    results['grad_access_with_sync'] = tester.test_gradient_access(
+    results['grad_access_with_sync'] = tester.test_gradient_access_fsdp1(
         model, "FSDP1 Gradient Access (Normal Sync)", clear_grads=False
     )
 
@@ -260,7 +324,7 @@ def test_fsdp1_capabilities():
             output = model(x)
             loss = loss_fn(output, target)
             loss.backward()
-            results['grad_access_no_sync'] = tester.test_gradient_access(
+            results['grad_access_no_sync'] = tester.test_gradient_access_fsdp1(
                 model, "FSDP1 Gradient Access (No Sync)", clear_grads=False
             )
 
@@ -278,7 +342,7 @@ def test_fsdp1_capabilities():
         loss = loss_fn(output, mb_target)
         loss.backward()
 
-        mb_result = tester.test_gradient_access(
+        mb_result = tester.test_gradient_access_fsdp1(
             model, f"FSDP1 Microbatch {i+1}", clear_grads=False
         )
         microbatch_results.append(mb_result['success'])
@@ -349,18 +413,18 @@ def test_fsdp2_capabilities():
     )
 
     # Test 2: Parameter access after forward pass
-    # optimizer.zero_grad()
-    # output = model(x)
-    # results['param_access_after_forward'] = tester.test_parameter_access(
-    #     model, "FSDP2 Parameter Access After Forward"
-    # )
+    optimizer.zero_grad()
+    output = model(x)
+    results['param_access_after_forward'] = tester.test_parameter_access(
+        model, "FSDP2 Parameter Access After Forward"
+    )
 
     # # Test 3: Gradient access with normal sync
-    # loss = loss_fn(output, target)
-    # loss.backward()
-    # results['grad_access_with_sync'] = tester.test_gradient_access(
-    #     model, "FSDP2 Gradient Access (Normal Sync)", clear_grads=False
-    # )
+    loss = loss_fn(output, target)
+    loss.backward()
+    results['grad_access_with_sync'] = tester.test_gradient_access_fsdp2(
+        model, "FSDP2 Gradient Access (Normal Sync)", clear_grads=False
+    )
 
     # Test 4: Gradient access with disabled sync
     optimizer.zero_grad()
@@ -369,7 +433,7 @@ def test_fsdp2_capabilities():
         output = model(x)
         loss = loss_fn(output, target)
         loss.backward()
-        results['grad_access_no_sync'] = tester.test_gradient_access(
+        results['grad_access_no_sync'] = tester.test_gradient_access_fsdp2(
             model, "FSDP2 Gradient Access (Sync Disabled)", clear_grads=False
         )
         model.set_requires_gradient_sync(True)
@@ -393,7 +457,7 @@ def test_fsdp2_capabilities():
         loss = loss_fn(output, mb_target)
         loss.backward()
 
-        mb_result = tester.test_gradient_access(
+        mb_result = tester.test_gradient_access_fsdp2(
             model, f"FSDP2 Microbatch {i+1}", clear_grads=False
         )
         microbatch_results.append(mb_result['success'])
@@ -515,11 +579,11 @@ def main():
     fsdp2_results = {}
 
     # Run FSDP1 tests
-    # try:
-    #     fsdp1_results = test_fsdp1_capabilities()
-    # except Exception as e:
-    #     print(f"\n❌ FSDP1 test failed: {e}")
-    #     traceback.print_exc()
+    try:
+        fsdp1_results = test_fsdp1_capabilities()
+    except Exception as e:
+        print(f"\n❌ FSDP1 test failed: {e}")
+        traceback.print_exc()
 
     # Run FSDP2 tests
     try:
@@ -529,12 +593,12 @@ def main():
         traceback.print_exc()
 
     # Compare results
-    # if fsdp1_results and fsdp2_results:
-    #     comparison = compare_results(fsdp1_results, fsdp2_results)
-    #     return 0 if not comparison['overall_regression'] else 1
-    # else:
-    #     print("\n❌ Could not complete comparison due to test failures")
-    #     return 1
+    if fsdp1_results and fsdp2_results:
+        comparison = compare_results(fsdp1_results, fsdp2_results)
+        return 0 if not comparison['overall_regression'] else 1
+    else:
+        print("\n❌ Could not complete comparison due to test failures")
+        return 1
 
 
 if __name__ == "__main__":
