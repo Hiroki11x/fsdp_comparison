@@ -37,6 +37,7 @@ echo "🔧 Environment Verification"
 echo "─────────────────────────────"
 
 # Check Python and PyTorch
+# Stderr is already redirected here, which is correct.
 python3 -c "
 import sys
 import torch
@@ -119,8 +120,9 @@ print_status "INFO" "Running detailed parameter/gradient access comparison..."
 echo "Command: python3 fsdp_gradient_comparison.py"
 echo
 
-python3 fsdp_gradient_comparison.py 2>&1 | tee single_gpu_output.log
-SINGLE_GPU_RESULT=$?
+# Redirect stderr (2) to /dev/null to hide all warnings and library logs
+python3 fsdp_gradient_comparison.py 2>/dev/null | tee single_gpu_output.log
+SINGLE_GPU_RESULT=${PIPESTATUS[0]}
 
 echo
 if [ $SINGLE_GPU_RESULT -eq 0 ]; then
@@ -142,8 +144,9 @@ if [ "$GPU_COUNT" -gt 1 ]; then
         echo "Command: torchrun --nproc_per_node=2 fsdp_gradient_comparison.py"
         echo
 
-        torchrun --nproc_per_node=2 fsdp_gradient_comparison.py 2>&1 | tee multi_gpu_2_output.log
-        MULTI_GPU_2_RESULT=$?
+        # Redirect stderr to /dev/null
+        torchrun --nproc_per_node=2 fsdp_gradient_comparison.py 2>/dev/null | tee multi_gpu_2_output.log
+        MULTI_GPU_2_RESULT=${PIPESTATUS[0]}
 
         if [ $MULTI_GPU_2_RESULT -eq 0 ]; then
             print_status "SUCCESS" "2-GPU test completed successfully"
@@ -158,8 +161,9 @@ if [ "$GPU_COUNT" -gt 1 ]; then
         echo "Command: torchrun --nproc_per_node=4 fsdp_gradient_comparison.py"
         echo
 
-        torchrun --nproc_per_node=4 fsdp_gradient_comparison.py 2>&1 | tee multi_gpu_4_output.log
-        MULTI_GPU_4_RESULT=$?
+        # Redirect stderr to /dev/null
+        torchrun --nproc_per_node=4 fsdp_gradient_comparison.py 2>/dev/null | tee multi_gpu_4_output.log
+        MULTI_GPU_4_RESULT=${PIPESTATUS[0]}
 
         if [ $MULTI_GPU_4_RESULT -eq 0 ]; then
             print_status "SUCCESS" "4-GPU test completed successfully"
